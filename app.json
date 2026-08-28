@@ -1,0 +1,8 @@
+{
+  "expo": {
+    "name": "Single Screen App",
+    "slug": "single-screen-app",
+    "version": "1.0.0",
+    "sdkVersion": "48.0.0"
+  }
+}

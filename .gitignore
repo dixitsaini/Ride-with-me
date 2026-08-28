@@ -1,0 +1,19 @@
+node_modules/
+.expo/
+.expo-shared/
+
+# Expo and React Native build output
+dist/
+web-build/
+android/.gradle/
+android/app/build/
+ios/Pods/
+
+# Local environment and editor files
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+.vscode/
+.idea/
