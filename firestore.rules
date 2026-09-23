@@ -1,0 +1,95 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function groupMember(groupId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid))
+        && get(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid)).data.status == 'ACTIVE';
+    }
+
+    function groupAdmin(groupId) {
+      return groupMember(groupId)
+        && get(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid)).data.role == 'ADMIN';
+    }
+
+    function validInvitation(invitationId, groupId) {
+      return invitationId != null
+        && exists(/databases/$(database)/documents/groupInvitations/$(invitationId))
+        && get(/databases/$(database)/documents/groupInvitations/$(invitationId)).data.groupId == groupId
+        && (!get(/databases/$(database)/documents/groupInvitations/$(invitationId)).data.keys().hasAll(['inviteeUserId'])
+          || get(/databases/$(database)/documents/groupInvitations/$(invitationId)).data.inviteeUserId == request.auth.uid)
+        && get(/databases/$(database)/documents/groupInvitations/$(invitationId)).data.revokedAt == null
+        && get(/databases/$(database)/documents/groupInvitations/$(invitationId)).data.expiresAt > request.time.toMillis();
+    }
+
+    match /groups/{groupId} {
+      allow create: if signedIn() && request.resource.data.ownerId == request.auth.uid;
+      allow read: if groupMember(groupId);
+      allow update: if groupAdmin(groupId)
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'state', 'updatedAt'])
+        || groupMember(groupId)
+        && !resource.data.keys().hasAll(['activeRideId'])
+        && request.resource.data.keys().hasAll(['activeRideId'])
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activeRideId', 'updatedAt'])
+        || groupAdmin(groupId)
+        && resource.data.keys().hasAll(['activeRideId'])
+        && !request.resource.data.keys().hasAll(['activeRideId'])
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activeRideId', 'updatedAt']);
+      allow delete: if false;
+
+      match /members/{userId} {
+        allow read: if groupMember(groupId) || (signedIn() && userId == request.auth.uid);
+        allow create: if (groupAdmin(groupId)
+          || (signedIn()
+            && request.resource.data.role == 'ADMIN'
+            && request.resource.data.userId == request.auth.uid
+            && getAfter(/databases/$(database)/documents/groups/$(groupId)).data.ownerId == request.auth.uid)
+          || (signedIn()
+            && userId == request.auth.uid
+            && request.resource.data.status == 'ACTIVE'
+            && validInvitation(request.resource.data.invitationId, groupId)));
+        allow update: if groupAdmin(groupId)
+          || (signedIn()
+            && userId == request.auth.uid
+            && get(/databases/$(database)/documents/groups/$(groupId)).data.ownerId != request.auth.uid
+            && (request.resource.data.status == 'LEFT'
+              || (request.resource.data.status == 'ACTIVE'
+                && validInvitation(request.resource.data.invitationId, groupId))));
+        allow delete: if false;
+      }
+    }
+
+    match /groupInvitations/{invitationId} {
+      allow read: if signedIn();
+      allow create: if groupAdmin(request.resource.data.groupId);
+      allow update: if groupAdmin(resource.data.groupId);
+      allow delete: if false;
+    }
+
+    match /rides/{rideId} {
+      allow read: if signedIn()
+        && resource.data.participantIds.hasAny([request.auth.uid]);
+      allow create: if signedIn()
+        && groupMember(request.resource.data.groupId)
+        && request.resource.data.participantIds.hasAny([request.auth.uid])
+        && request.resource.data.state == 'READY';
+      allow update: if signedIn()
+        && groupAdmin(resource.data.groupId)
+        && request.resource.data.groupId == resource.data.groupId
+        && request.resource.data.participantIds == resource.data.participantIds;
+      allow delete: if false;
+
+      match /participants/{userId} {
+        allow read: if signedIn()
+          && get(/databases/$(database)/documents/rides/$(rideId)).data.participantIds.hasAny([request.auth.uid]);
+        allow write: if groupAdmin(get(/databases/$(database)/documents/rides/$(rideId)).data.groupId);
+      }
+    }
+  }
+}

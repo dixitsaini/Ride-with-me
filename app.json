@@ -1,8 +1,28 @@
 {
   "expo": {
-    "name": "Single Screen App",
-    "slug": "single-screen-app",
+    "name": "Rider App Foundation",
+    "slug": "rider-app-foundation",
     "version": "1.0.0",
-    "sdkVersion": "48.0.0"
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.rider.app.foundation",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": false
+        }
+      }
+    },
+    "android": {
+      "package": "com.rider.app.foundation",
+      "permissions": []
+    },
+    "plugins": ["expo-secure-store", "expo-notifications"],
+    "experiments": {
+      "typedRoutes": true
+    }
   }
 }

@@ -1,0 +1,23 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "liveLocations": {
+      "$contextId": {
+        ".read": "auth != null && root.child('liveLocations').child($contextId).child('access').child(auth.uid).val() == true",
+        "access": {
+          "$userId": {
+            ".write": "auth != null && auth.uid == $userId",
+            ".validate": "newData.val() == true"
+          }
+        },
+        "locations": {
+          "$userId": {
+            ".write": "auth != null && auth.uid == $userId && root.child('liveLocations').child($contextId).child('access').child(auth.uid).val() == true",
+            ".validate": "newData.hasChildren(['latitude', 'longitude', 'timestamp', 'accuracy']) && newData.child('latitude').isNumber() && newData.child('latitude').val() >= -90 && newData.child('latitude').val() <= 90 && newData.child('longitude').isNumber() && newData.child('longitude').val() >= -180 && newData.child('longitude').val() <= 180 && newData.child('timestamp').isNumber() && newData.child('accuracy').isNumber()"
+          }
+        }
+      }
+    }
+  }
+}
