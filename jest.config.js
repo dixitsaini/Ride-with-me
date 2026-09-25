@@ -1,12 +1,16 @@
 module.exports = {
   preset: "jest-expo",
-  setupFilesAfterEnv: ["<rootDir>/jest.setup.ts"],
+  setupFilesAfterEnv: [
+    "<rootDir>/jest.setup.ts",
+    "<rootDir>/jest.silenceLogs.ts",
+  ],
   testPathIgnorePatterns: [
     "/node_modules/",
     "/android/",
     "/ios/",
-    "/src/security/firebase.rules.test.ts",
-    "/src/features/riding/firebase.integration.test.ts",
+    // Firebase rules/integration suites run under jest.firebase.config.js.
+    "\\.rules\\.test\\.ts$",
+    "\\.integration\\.test\\.ts$",
   ],
   collectCoverageFrom: ["src/**/*.{ts,tsx}", "!src/**/*.d.ts"],
 };

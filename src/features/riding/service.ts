@@ -3,6 +3,7 @@ import type {
   ConnectionState,
   LocationController,
   LocationSample,
+  LocationSamplePublisher,
   RealtimeLocationService,
   RealtimeLocationUpdate,
 } from "../../core/location";
@@ -19,6 +20,9 @@ import {
   type RideParticipationState,
 } from "./domain";
 import type { RidingEntitlements } from "./entitlements";
+import { createRideContext as buildRideContext } from "./rideContext";
+import type { RideContext, RideContextOptions } from "./rideContext";
+import { createRideLocationLifecycle } from "./rideLocation";
 import type { RidingRepository } from "./repository";
 
 export type RidingService = {
@@ -38,7 +42,25 @@ export type RidingService = {
   removeMember: (groupId: string, userId: string) => Promise<GroupMember>;
   startRide: (groupId: string) => Promise<Ride>;
   getRide: (rideId: string) => Promise<Ride | null>;
+  getCurrentUserId: () => Promise<string>;
+  getActiveRide: (groupId: string) => Promise<Ride | null>;
+  subscribeToGroupMembers: (
+    groupId: string,
+    listener: (members: GroupMember[]) => void,
+    onError?: (error: unknown) => void,
+  ) => () => void;
+  subscribeToRideState: (
+    rideId: string,
+    listener: (ride: Ride | null) => void,
+    onError?: (error: unknown) => void,
+  ) => () => void;
   updateRideState: (rideId: string, nextState: Ride["state"]) => Promise<Ride>;
+  /** Re-derives location side effects from an observed ride snapshot. */
+  reconcileRideLocation: (ride: Ride | null) => Promise<void>;
+  createRideContext: (
+    rideId: string,
+    options?: Omit<RideContextOptions, "rideId" | "userId" | "repository" | "realtime" | "locationController" | "lifecycle">,
+  ) => Promise<RideContext>;
   publishCurrentLocation: (rideId: string) => Promise<LocationSample | null>;
   subscribeRideLocations: (
     rideId: string,
@@ -244,8 +266,21 @@ export function createRidingService(
       };
       const created = await repository.createRide(ride);
       realtime.connect();
-      await realtime.authorizeContext?.(ride.contextId);
+      const publisher: LocationSamplePublisher = {
+        publish: (sample) => realtime.publish(created.contextId, sample),
+        isReachable: () => {
+          const connection = realtime.getConnectionState();
+          return connection !== "DISCONNECTED" && connection !== "ERROR";
+        },
+        getConnectionState: () => realtime.getConnectionState(),
+      };
+      locationController.setPublisher?.(publisher);
+      locationController.setContext?.({ rideState: "ACTIVE" });
+      await realtime.authorizeContext?.(created.contextId);
       await locationController.startTracking();
+      await locationController.startBackgroundUpdates?.({
+        requestPermission: true,
+      });
       return repository.updateRideState(created.id, "ACTIVE", participants);
     },
     getRide(rideId) {
@@ -275,10 +310,20 @@ export function createRidingService(
         state,
         participants,
       );
+      locationController.setContext?.({ rideState: state });
       if (state === "COMPLETED" || state === "CANCELLED") {
+        await locationController.stopBackgroundUpdates?.();
         await locationController.stopTracking();
+        locationController.setPublisher?.(null);
         realtime.disconnect();
         await realtime.revokeContext?.(ride.contextId);
+      } else if (state === "PAUSED") {
+        await locationController.pauseTracking?.();
+      } else if (state === "ACTIVE") {
+        await locationController.resumeTracking?.();
+        await locationController.startBackgroundUpdates?.({
+          requestPermission: false,
+        });
       }
       return updated;
     },

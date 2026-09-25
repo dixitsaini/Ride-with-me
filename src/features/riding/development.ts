@@ -1,9 +1,11 @@
 import { FirebaseAnonymousIdentityAdapter } from "../../core/identity/FirebaseAnonymousIdentityAdapter";
 import type { IdentityService } from "../../core/identity";
+import { createLocationController } from "../../core/location";
+import { createLocationEngine } from "../../core/location/LocationEngine";
 import {
-  createMockLocationService,
-  createLocationController,
-} from "../../core/location";
+  createBackgroundLocationProvider,
+  createLocationProvider,
+} from "../../core/location/locationProvider";
 import {
   createRealtimeLocationService,
   getConfiguredRealtimeProviderKind,
@@ -26,6 +28,13 @@ export function createDevelopmentIdentityService(): IdentityService {
   };
 }
 
+export function createDevelopmentLocationEngine() {
+  return createLocationEngine({
+    provider: createLocationProvider(),
+    background: createBackgroundLocationProvider(),
+  });
+}
+
 export function createDevelopmentRidingService() {
   const identity = createDevelopmentIdentityService();
   const useFirebase = process.env.EXPO_PUBLIC_DATA_PROVIDER === "firebase";
@@ -33,7 +42,7 @@ export function createDevelopmentRidingService() {
     ? new FirestoreRidingRepository()
     : new InMemoryRidingRepository();
   const locationController = createLocationController(
-    createMockLocationService(),
+    createDevelopmentLocationEngine(),
   );
   const realtime = createRealtimeLocationService(
     getConfiguredRealtimeProviderKind(),

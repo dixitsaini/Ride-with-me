@@ -1,70 +1,95 @@
 import React from "react";
-import { StyleSheet, Text, View } from "react-native";
-import MapView, { Marker, type Region } from "react-native-maps";
-import type { LocationSample } from "../../core/location";
-
-export type MapRider = {
-  userId: string;
-  location: LocationSample;
-  stale: boolean;
-};
+import { StyleSheet, type StyleProp, type ViewStyle } from "react-native";
+import MapView, { Marker, Polyline, type Region } from "react-native-maps";
+import type {
+  MapRegion,
+  MapRenderState,
+  RiderMarker,
+  RiderMarkerState,
+} from "./types";
 
 type ReactNativeMapSurfaceProps = {
-  riders: MapRider[];
+  state: MapRenderState;
+  onUserCameraGesture?: (region: MapRegion) => void;
+  style?: StyleProp<ViewStyle>;
+  showsUserLocation?: boolean;
 };
 
-const defaultRegion: Region = {
+const FALLBACK_REGION: Region = {
   latitude: 40.7128,
   longitude: -74.006,
   latitudeDelta: 0.08,
   longitudeDelta: 0.08,
 };
 
-export function ReactNativeMapSurface({ riders }: ReactNativeMapSurfaceProps) {
-  const region = riders[0]
-    ? {
-        latitude: riders[0].location.latitude,
-        longitude: riders[0].location.longitude,
-        latitudeDelta: 0.08,
-        longitudeDelta: 0.08,
-      }
-    : defaultRegion;
+/**
+ * Visual separation of marker semantics. The contract only carries
+ * `RiderMarkerState`; the concrete styling stays inside the provider.
+ */
+const MARKER_OPACITY: Record<RiderMarkerState, number> = {
+  LIVE: 1,
+  STALE: 0.55,
+  UNAVAILABLE: 0.35,
+};
+
+function riderDescription(marker: RiderMarker): string {
+  return marker.state;
+}
+
+export function ReactNativeMapSurface({
+  state,
+  onUserCameraGesture,
+  style,
+  showsUserLocation = true,
+}: ReactNativeMapSurfaceProps) {
+  const region = (state.camera.region ?? FALLBACK_REGION) as Region;
 
   return (
-    <View style={styles.container}>
-      <MapView style={styles.map} initialRegion={region} showsUserLocation>
-        {riders.map((rider) => (
-          <Marker
-            key={rider.userId}
-            coordinate={{
-              latitude: rider.location.latitude,
-              longitude: rider.location.longitude,
-            }}
-            title={rider.userId}
-            description={rider.stale ? "STALE" : "LIVE"}
-          />
-        ))}
-      </MapView>
-      {riders.length === 0 ? (
-        <View style={styles.emptyOverlay}>
-          <Text style={styles.emptyText}>Waiting for rider locations</Text>
-        </View>
+    <MapView
+      style={[styles.map, style]}
+      region={region}
+      showsUserLocation={showsUserLocation}
+      onRegionChangeComplete={(nextRegion) =>
+        onUserCameraGesture?.(nextRegion as MapRegion)
+      }
+    >
+      {state.currentRider?.coordinate ? (
+        <Marker
+          key={`current-${state.currentRider.riderId}`}
+          coordinate={state.currentRider.coordinate}
+          title={state.currentRider.label}
+          description={riderDescription(state.currentRider)}
+          opacity={MARKER_OPACITY[state.currentRider.state]}
+          tracksViewChanges={false}
+        />
       ) : null}
-    </View>
+      {state.riders.map((marker) =>
+        marker.coordinate ? (
+          <Marker
+            key={marker.riderId}
+            coordinate={marker.coordinate}
+            title={marker.label}
+            description={riderDescription(marker)}
+            opacity={MARKER_OPACITY[marker.state]}
+            tracksViewChanges={false}
+          />
+        ) : null,
+      )}
+      {state.polylines.map((polyline) => (
+        <Polyline key={polyline.id} coordinates={polyline.coordinates} />
+      ))}
+      {state.annotations.map((annotation) => (
+        <Marker
+          key={`annotation-${annotation.id}`}
+          coordinate={annotation.coordinate}
+          title={annotation.title}
+          description={annotation.subtitle}
+        />
+      ))}
+    </MapView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, minHeight: 320 },
   map: { flex: 1 },
-  emptyOverlay: {
-    position: "absolute",
-    top: 16,
-    left: 16,
-    right: 16,
-    padding: 12,
-    backgroundColor: "rgba(255,255,255,0.92)",
-    borderRadius: 8,
-  },
-  emptyText: { color: "#101828", fontSize: 14 },
 });

@@ -3,11 +3,13 @@ import {
   connectAuthEmulator,
   getAuth,
   signInAnonymously,
+  signOut,
   type Auth,
 } from "firebase/auth";
 import {
   connectDatabaseEmulator,
   getDatabase,
+  goOffline,
   ref,
   get,
   type Database,
@@ -102,7 +104,12 @@ async function waitFor(
 }
 
 afterAll(async () => {
-  await Promise.all(clients.map((client) => client.realtime.dispose()));
+  clients.forEach((client) => client.realtime.dispose());
+  // Signing out cancels Firebase Auth's proactive token refresh timer, and
+  // goOffline closes the Realtime Database socket; without both the process
+  // keeps a ref'd handle open and Jest never exits.
+  await Promise.all(clients.map((client) => signOut(client.auth)));
+  clients.forEach((client) => goOffline(client.database));
   await Promise.all(apps.map((app) => deleteApp(app)));
 });
 

@@ -16,6 +16,8 @@ export type Group = {
   ownerId: string;
   state: GroupState;
   settings: GroupSettings;
+  /** Ride currently driving this group's location context, when one exists. */
+  activeRideId?: string | null;
   createdAt: number;
   updatedAt: number;
 };

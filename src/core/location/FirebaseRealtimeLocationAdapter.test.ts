@@ -20,15 +20,22 @@ jest.mock("firebase/app", () => ({
 describe("FirebaseRealtimeLocationAdapter", () => {
   const identity = { getIdentity: jest.fn(async () => ({ userId: "user-a" })) };
   const callbacks: ((snapshot: { val: () => unknown }) => void)[] = [];
+  const cancelCallbacks: (() => void)[] = [];
   const unsubscribe = jest.fn();
 
   beforeEach(() => {
     jest.clearAllMocks();
     callbacks.length = 0;
-    (onValue as jest.Mock).mockImplementation((_reference, callback) => {
-      callbacks.push(callback);
-      return unsubscribe;
-    });
+    cancelCallbacks.length = 0;
+    (onValue as jest.Mock).mockImplementation(
+      (_reference, callback, cancel?: () => void) => {
+        callbacks.push(callback);
+        if (cancel) {
+          cancelCallbacks.push(cancel);
+        }
+        return unsubscribe;
+      },
+    );
   });
 
   afterEach(() => {
@@ -98,6 +105,60 @@ describe("FirebaseRealtimeLocationAdapter", () => {
     expect(adapter.getConnectionState()).toBe("CONNECTED");
     callbacks[0]?.({ val: () => false });
     expect(adapter.getConnectionState()).toBe("RECONNECTING");
+  });
+
+  it("reconnects after a drop without leaking the connectivity subscription", () => {
+    const adapter = createAdapter();
+    adapter.connect();
+    callbacks[0]?.({ val: () => true });
+    expect(adapter.getConnectionState()).toBe("CONNECTED");
+
+    adapter.reconnect();
+    expect(onValue).toHaveBeenCalledTimes(2);
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(adapter.getConnectionState()).toBe("CONNECTING");
+
+    callbacks[1]?.({ val: () => false });
+    expect(adapter.getConnectionState()).toBe("RECONNECTING");
+    callbacks[1]?.({ val: () => true });
+    expect(adapter.getConnectionState()).toBe("CONNECTED");
+
+    adapter.disconnect();
+    expect(adapter.getConnectionState()).toBe("DISCONNECTED");
+    expect(unsubscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it("resubscribes to a context after the last listener left", async () => {
+    const adapter = createAdapter();
+    const updates: RealtimeLocationUpdate[] = [];
+    const stop = adapter.subscribe("context-a", (update) =>
+      updates.push(update),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
+    expect(onValue).toHaveBeenCalledTimes(1);
+
+    stop();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+
+    adapter.subscribe("context-a", (update) => updates.push(update));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
+
+    expect(onValue).toHaveBeenCalledTimes(2);
+    expect(adapter.getConnectionState()).toBe("CONNECTED");
+  });
+
+  it("surfaces a cancelled listener as an error connection state", async () => {
+    const adapter = createAdapter();
+    adapter.subscribe("context-a", () => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
+    expect(adapter.getConnectionState()).toBe("CONNECTED");
+
+    cancelCallbacks[0]?.();
+
+    expect(adapter.getConnectionState()).toBe("ERROR");
   });
 
   it("normalizes snapshots, marks stale data, and cleans up duplicate subscriptions", async () => {

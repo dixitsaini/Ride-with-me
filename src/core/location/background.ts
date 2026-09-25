@@ -1,21 +1,29 @@
 import * as TaskManager from "expo-task-manager";
-import { PLATFORM_VALIDATION_REQUIRED } from "./ExpoLocationAdapter";
+import {
+  BACKGROUND_LOCATION_TASK,
+  handleBackgroundLocationEvent,
+} from "./backgroundLocation";
 
-export const BACKGROUND_LOCATION_TASK = "background-location-task";
+export * from "./backgroundLocation";
 
-TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
-  if (error) {
-    console.warn("[background-location-task]", error);
+let taskRegistered = false;
+
+/**
+ * Registers the OS background location task exactly once. Expo requires the
+ * task to be defined while the entry module is still evaluating, so this runs
+ * at import time; the exported function keeps registration explicit for tests
+ * and for code paths that are loaded lazily.
+ */
+export function registerBackgroundLocationTask(): boolean {
+  if (taskRegistered) {
+    return false;
   }
+  taskRegistered = true;
+  TaskManager.defineTask(
+    BACKGROUND_LOCATION_TASK,
+    handleBackgroundLocationEvent,
+  );
+  return true;
+}
 
-  if (data) {
-    console.info("[background-location-task]", { data });
-  }
-});
-
-export const BACKGROUND_LOCATION_PLATFORM_REQUIREMENTS = {
-  ios: PLATFORM_VALIDATION_REQUIRED,
-  android: PLATFORM_VALIDATION_REQUIRED,
-  lifecycle: PLATFORM_VALIDATION_REQUIRED,
-  terminatedApp: PLATFORM_VALIDATION_REQUIRED,
-};
+registerBackgroundLocationTask();

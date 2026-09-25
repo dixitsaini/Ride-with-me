@@ -6,6 +6,7 @@ import {
   getDoc,
   getDocs,
   getFirestore,
+  onSnapshot,
   query,
   runTransaction,
   setDoc,
@@ -44,6 +45,7 @@ function toGroup(id: string, data: FirestoreGroup): Group {
     ownerId: data.ownerId,
     state: data.state,
     settings: data.settings,
+    activeRideId: data.activeRideId ?? null,
     createdAt: data.createdAt,
     updatedAt: data.updatedAt,
   };
@@ -191,6 +193,31 @@ export class FirestoreRidingRepository implements RidingRepository {
     return member;
   }
 
+  subscribeToMembers(
+    groupId: string,
+    listener: (members: GroupMember[]) => void,
+    onError?: (error: unknown) => void,
+  ): () => void {
+    return onSnapshot(
+      membersCollection(this.firestore, groupId),
+      (snapshot) =>
+        listener(
+          snapshot.docs.map((item) => toMember(item.data() as GroupMember)),
+        ),
+      onError,
+    );
+  }
+
+  async listInvitations(groupId: string): Promise<GroupInvitation[]> {
+    const snapshot = await getDocs(
+      query(
+        collection(this.firestore, "groupInvitations"),
+        where("groupId", "==", groupId),
+      ),
+    );
+    return snapshot.docs.map((item) => item.data() as GroupInvitation);
+  }
+
   async createInvitation(
     invitation: GroupInvitation,
   ): Promise<GroupInvitation> {
@@ -249,6 +276,35 @@ export class FirestoreRidingRepository implements RidingRepository {
       : null;
   }
 
+  async getActiveRide(groupId: string): Promise<Ride | null> {
+    const snapshot = await getDoc(doc(this.firestore, "groups", groupId));
+    if (!snapshot.exists()) {
+      return null;
+    }
+    const activeRideId = (snapshot.data() as FirestoreGroup).activeRideId;
+    if (!activeRideId) {
+      return null;
+    }
+    return this.getRide(activeRideId);
+  }
+
+  subscribeToRide(
+    rideId: string,
+    listener: (ride: Ride | null) => void,
+    onError?: (error: unknown) => void,
+  ): () => void {
+    return onSnapshot(
+      doc(this.firestore, "rides", rideId),
+      (snapshot) =>
+        listener(
+          snapshot.exists()
+            ? toRide(snapshot.id, snapshot.data() as Omit<Ride, "id">)
+            : null,
+        ),
+      onError,
+    );
+  }
+
   async updateRideState(
     rideId: string,
     state: RideState,
@@ -264,6 +320,7 @@ export class FirestoreRidingRepository implements RidingRepository {
       transaction.update(rideReference, {
         state,
         participants,
+        participantIds: participants.map((participant) => participant.userId),
         updatedAt: Date.now(),
       });
       if (state === "COMPLETED" || state === "CANCELLED") {
@@ -277,6 +334,7 @@ export class FirestoreRidingRepository implements RidingRepository {
       ...currentRide,
       state,
       participants,
+      participantIds: participants.map((participant) => participant.userId),
       updatedAt: Date.now(),
     });
   }

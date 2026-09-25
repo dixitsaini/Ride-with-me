@@ -27,8 +27,22 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/groupInvitations/$(invitationId)).data.expiresAt > request.time.toMillis();
     }
 
+    // A participant may drop only itself, and only while the ride itself is
+    // otherwise untouched: membership changes never carry a state change.
+    function selfRemovalFromRide() {
+      return resource.data.participantIds.hasAny([request.auth.uid])
+        && !request.resource.data.participantIds.hasAny([request.auth.uid])
+        && request.resource.data.participantIds.size() == resource.data.participantIds.size() - 1
+        && request.resource.data.state == resource.data.state;
+    }
+
+    // The roster bound mirrors `entitlements.maxGroupMembers()`; settings are
+    // immutable after creation so the bound cannot be widened by an update.
     match /groups/{groupId} {
-      allow create: if signedIn() && request.resource.data.ownerId == request.auth.uid;
+      allow create: if signedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.settings.maxMembers >= 1
+        && request.resource.data.settings.maxMembers <= 10;
       allow read: if groupMember(groupId);
       allow update: if groupAdmin(groupId)
         && request.resource.data.ownerId == resource.data.ownerId
@@ -79,10 +93,17 @@ service cloud.firestore {
         && groupMember(request.resource.data.groupId)
         && request.resource.data.participantIds.hasAny([request.auth.uid])
         && request.resource.data.state == 'READY';
+      // The roster can only ever shrink, and only in step with `participants`
+      // (the repository derives `participantIds` from `participants`).
       allow update: if signedIn()
-        && groupAdmin(resource.data.groupId)
         && request.resource.data.groupId == resource.data.groupId
-        && request.resource.data.participantIds == resource.data.participantIds;
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.contextId == resource.data.contextId
+        && request.resource.data.participantIds.size() == request.resource.data.participants.size()
+        && resource.data.participantIds.hasAll(request.resource.data.participantIds)
+        && request.resource.data.participantIds.size() <= resource.data.participantIds.size()
+        && (groupAdmin(resource.data.groupId)
+          || selfRemovalFromRide());
       allow delete: if false;
 
       match /participants/{userId} {

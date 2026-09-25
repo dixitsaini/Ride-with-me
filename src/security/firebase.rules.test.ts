@@ -53,7 +53,10 @@ async function seedFirestore() {
       state: "ACTIVE",
       contextId: "ride-a",
       participantIds: ["admin-a", "rider-a"],
-      participants: [],
+      participants: [
+        { userId: "admin-a", state: "ACTIVE", joinedAt: 1 },
+        { userId: "rider-a", state: "ACTIVE", joinedAt: 1 },
+      ],
       createdAt: 1,
       updatedAt: 1,
     });
@@ -63,6 +66,7 @@ async function seedFirestore() {
 async function seedRealtime() {
   await testEnvironment.withSecurityRulesDisabled(async (context) => {
     const database = context.database();
+    await database.ref("liveLocations/ride-a/owner").set("admin-a");
     await database.ref("liveLocations/ride-a/access/admin-a").set(true);
     await database.ref("liveLocations/ride-a/access/rider-a").set(true);
     await database.ref("liveLocations/ride-a/locations/admin-a").set({
@@ -161,6 +165,114 @@ describe("Firestore security rules", () => {
     );
   });
 
+  it("bounds group creation to the configured member cap", async () => {
+    const stranger = testEnvironment
+      .authenticatedContext("stranger")
+      .firestore();
+
+    await assertFails(
+      setDoc(doc(stranger, "groups/too-big"), {
+        name: "Too Big",
+        ownerId: "stranger",
+        state: "ACTIVE",
+        settings: { maxMembers: 11 },
+        createdAt: 1,
+        updatedAt: 1,
+      }),
+    );
+    await assertSucceeds(
+      setDoc(doc(stranger, "groups/within-cap"), {
+        name: "Within Cap",
+        ownerId: "stranger",
+        state: "ACTIVE",
+        settings: { maxMembers: 10 },
+        createdAt: 1,
+        updatedAt: 1,
+      }),
+    );
+    await assertFails(
+      setDoc(doc(stranger, "groups/no-cap"), {
+        name: "No Cap",
+        ownerId: "stranger",
+        state: "ACTIVE",
+        settings: { maxMembers: 0 },
+        createdAt: 1,
+        updatedAt: 1,
+      }),
+    );
+  });
+
+  it("lets an admin shrink a ride roster but never grow it", async () => {
+    const admin = testEnvironment.authenticatedContext("admin-a").firestore();
+
+    await assertFails(
+      updateDoc(doc(admin, "rides/ride-a"), {
+        participantIds: ["admin-a", "rider-a", "rider-c"],
+        participants: [
+          { userId: "admin-a", state: "ACTIVE", joinedAt: 1 },
+          { userId: "rider-a", state: "ACTIVE", joinedAt: 1 },
+          { userId: "rider-c", state: "ACTIVE", joinedAt: 1 },
+        ],
+        updatedAt: 2,
+      }),
+    );
+
+    await assertSucceeds(
+      updateDoc(doc(admin, "rides/ride-a"), {
+        participantIds: ["admin-a"],
+        participants: [{ userId: "admin-a", state: "ACTIVE", joinedAt: 1 }],
+        updatedAt: 3,
+      }),
+    );
+
+    await assertFails(
+      updateDoc(doc(admin, "rides/ride-a"), {
+        participantIds: ["admin-a", "rider-a"],
+        participants: [
+          { userId: "admin-a", state: "ACTIVE", joinedAt: 1 },
+          { userId: "rider-a", state: "ACTIVE", joinedAt: 1 },
+        ],
+        updatedAt: 4,
+      }),
+    );
+  });
+
+  it("lets a participant drop only itself from a ride roster", async () => {
+    const rider = testEnvironment.authenticatedContext("rider-a").firestore();
+    const stranger = testEnvironment
+      .authenticatedContext("stranger")
+      .firestore();
+
+    await assertFails(
+      updateDoc(doc(rider, "rides/ride-a"), {
+        participantIds: ["rider-a"],
+        participants: [{ userId: "rider-a", state: "ACTIVE", joinedAt: 1 }],
+        updatedAt: 2,
+      }),
+    );
+    await assertFails(
+      updateDoc(doc(stranger, "rides/ride-a"), {
+        participantIds: ["admin-a"],
+        participants: [{ userId: "admin-a", state: "ACTIVE", joinedAt: 1 }],
+        updatedAt: 2,
+      }),
+    );
+    await assertFails(
+      updateDoc(doc(rider, "rides/ride-a"), {
+        state: "COMPLETED",
+        updatedAt: 2,
+      }),
+    );
+
+    await assertSucceeds(
+      updateDoc(doc(rider, "rides/ride-a"), {
+        participantIds: ["admin-a"],
+        participants: [{ userId: "admin-a", state: "ACTIVE", joinedAt: 1 }],
+        updatedAt: 3,
+      }),
+    );
+  });
+
   it("protect invitations and reject revoked invitations", async () => {
     const rider = testEnvironment.authenticatedContext("rider-a").firestore();
     const admin = testEnvironment.authenticatedContext("admin-a").firestore();
@@ -253,6 +365,48 @@ describe("Realtime Database security rules", () => {
         timestamp: Date.now(),
         accuracy: 6,
       }),
+    );
+  });
+
+  it("requires an owner bootstrap before a participant can be granted", async () => {
+    await assertSucceeds(
+      databaseFor("rider-c")
+        .ref("liveLocations/brand-new/access/rider-c")
+        .set(true),
+    );
+    await assertFails(
+      databaseFor("stranger")
+        .ref("liveLocations/brand-new/access/stranger")
+        .set(true),
+    );
+  });
+
+  it("does not let a participant grant itself access on an owned context", async () => {
+    await assertFails(
+      databaseFor("stranger")
+        .ref("liveLocations/ride-a/access/stranger")
+        .set(true),
+    );
+    await assertFails(
+      databaseFor("rider-a").ref("liveLocations/ride-a/owner").set("rider-a"),
+    );
+  });
+
+  it("lets only the owner revoke another participant", async () => {
+    await assertFails(
+      databaseFor("rider-a")
+        .ref("liveLocations/ride-a/access/admin-a")
+        .set(null),
+    );
+    await assertSucceeds(
+      databaseFor("admin-a")
+        .ref("liveLocations/ride-a/access/rider-a")
+        .set(null),
+    );
+    await assertSucceeds(
+      databaseFor("rider-a")
+        .ref("liveLocations/ride-a/access/rider-a")
+        .set(null),
     );
   });
 });

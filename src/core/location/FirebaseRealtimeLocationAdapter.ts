@@ -3,6 +3,7 @@ import {
   onValue,
   ref,
   set,
+  update,
   type Database,
   type DataSnapshot,
   type Unsubscribe,
@@ -16,6 +17,7 @@ import {
   type RealtimeLocationUpdate,
 } from "./index";
 import { getFirebaseApp } from "../firebase/config";
+import { createLogger } from "../logger";
 import type { IdentityService } from "../identity";
 
 export type FirebaseRealtimeLocationAdapterOptions = {
@@ -87,12 +89,24 @@ export class FirebaseRealtimeLocationAdapter implements RealtimeLocationService 
   private connectionState: ConnectionState = "DISCONNECTED";
   private lastPublishedKey: string | null = null;
   private connectionSubscription: Unsubscribe | null = null;
+  private readonly log = createLogger("location.realtime");
 
   constructor(options: FirebaseRealtimeLocationAdapterOptions) {
     this.database = options.database ?? getDatabase(getFirebaseApp());
     this.identity = options.identity;
     this.staleThresholdMs =
       options.staleThresholdMs ?? DEFAULT_LOCATION_STALE_THRESHOLD_MS;
+  }
+
+  private setConnectionState(next: ConnectionState): void {
+    if (this.connectionState === next) {
+      return;
+    }
+    this.log.debug("connection state", {
+      from: this.connectionState,
+      to: next,
+    });
+    this.connectionState = next;
   }
 
   async publish(contextId: string, location: LocationSample): Promise<void> {
@@ -121,33 +135,59 @@ export class FirebaseRealtimeLocationAdapter implements RealtimeLocationService 
       );
       this.lastPublishedKey = key;
     } catch (error) {
-      this.connectionState = "ERROR";
+      this.setConnectionState("ERROR");
+      this.log.warn("publish failed", {
+        reason: error instanceof Error ? error.message : "unknown",
+      });
       throw new Error(
         `Realtime location publish failed: ${error instanceof Error ? error.message : "unknown error"}`,
       );
     }
   }
 
-  async authorizeContext(contextId: string): Promise<void> {
+  async authorizeContext(
+    contextId: string,
+    participants: readonly string[] = [],
+  ): Promise<void> {
     const identity = await this.identity.getIdentity();
-    await set(
-      ref(
-        this.database,
-        `liveLocations/${contextId}/access/${identity.userId}`,
-      ),
-      true,
-    );
+    const contextReference = ref(this.database, `liveLocations/${contextId}`);
+    const updates: Record<string, unknown> = {
+      owner: identity.userId,
+      [`access/${identity.userId}`]: true,
+    };
+    const seen = new Set<string>([identity.userId]);
+    for (const participant of participants) {
+      if (!participant || seen.has(participant)) {
+        continue;
+      }
+      seen.add(participant);
+      updates[`access/${participant}`] = true;
+    }
+
+    await update(contextReference, updates);
   }
 
-  async revokeContext(contextId: string): Promise<void> {
+  async revokeContext(
+    contextId: string,
+    participants?: readonly string[],
+  ): Promise<void> {
     const identity = await this.identity.getIdentity();
-    await set(
-      ref(
-        this.database,
-        `liveLocations/${contextId}/access/${identity.userId}`,
-      ),
-      null,
-    );
+    const targets =
+      participants === undefined ? [identity.userId] : [...participants];
+    const updates: Record<string, null> = {};
+    const seen = new Set<string>();
+    for (const participant of targets) {
+      if (!participant || seen.has(participant)) {
+        continue;
+      }
+      seen.add(participant);
+      updates[`access/${participant}`] = null;
+    }
+    if (Object.keys(updates).length === 0) {
+      return;
+    }
+
+    await update(ref(this.database, `liveLocations/${contextId}`), updates);
   }
 
   dispose(): void {
@@ -166,16 +206,16 @@ export class FirebaseRealtimeLocationAdapter implements RealtimeLocationService 
     const contextListeners = this.listeners.get(contextId) ?? new Set();
     contextListeners.add(listener);
     this.listeners.set(contextId, contextListeners);
+    this.log.debug("subscribe", { listeners: contextListeners.size });
 
     if (
       !this.subscriptions.has(contextId) &&
       !this.pendingSubscriptions.has(contextId)
     ) {
-      this.connectionState = "CONNECTING";
+      this.setConnectionState("CONNECTING");
       this.pendingSubscriptions.add(contextId);
       void this.identity
         .getIdentity()
-        .then(() => this.authorizeContext(contextId))
         .then(() => {
           if (!this.listeners.has(contextId)) {
             return;
@@ -189,14 +229,14 @@ export class FirebaseRealtimeLocationAdapter implements RealtimeLocationService 
             contextReference,
             (snapshot) => this.handleSnapshot(contextId, snapshot),
             () => {
-              this.connectionState = "ERROR";
+              this.setConnectionState("ERROR");
             },
           );
           this.subscriptions.set(contextId, unsubscribe);
-          this.connectionState = "CONNECTED";
+          this.setConnectionState("CONNECTED");
         })
         .catch(() => {
-          this.connectionState = "ERROR";
+          this.setConnectionState("ERROR");
         })
         .finally(() => {
           this.pendingSubscriptions.delete(contextId);
@@ -205,6 +245,7 @@ export class FirebaseRealtimeLocationAdapter implements RealtimeLocationService 
 
     return () => {
       contextListeners.delete(listener);
+      this.log.debug("unsubscribe", { listeners: contextListeners.size });
       if (contextListeners.size > 0) {
         return;
       }
@@ -220,29 +261,30 @@ export class FirebaseRealtimeLocationAdapter implements RealtimeLocationService 
           this.staleTimers.delete(key);
         });
       if (this.subscriptions.size === 0) {
-        this.connectionState = "DISCONNECTED";
+        this.setConnectionState("DISCONNECTED");
       }
     };
   }
 
   connect(): void {
-    this.connectionState = "CONNECTING";
+    this.setConnectionState("CONNECTING");
     const connectedReference = ref(this.database, ".info/connected");
     this.connectionSubscription?.();
     this.connectionSubscription = onValue(connectedReference, (snapshot) => {
-      this.connectionState =
-        snapshot.val() === true ? "CONNECTED" : "RECONNECTING";
+      this.setConnectionState(
+        snapshot.val() === true ? "CONNECTED" : "RECONNECTING",
+      );
     });
   }
 
   disconnect(): void {
     this.connectionSubscription?.();
     this.connectionSubscription = null;
-    this.connectionState = "DISCONNECTED";
+    this.setConnectionState("DISCONNECTED");
   }
 
   reconnect(): void {
-    this.connectionState = "RECONNECTING";
+    this.setConnectionState("RECONNECTING");
     this.connect();
   }
 
@@ -280,7 +322,7 @@ export class FirebaseRealtimeLocationAdapter implements RealtimeLocationService 
         this.listeners.get(contextId)?.forEach((listener) => listener(update));
 
         if (!update.stale) {
-          this.connectionState = "CONNECTED";
+          this.setConnectionState("CONNECTED");
           const delay = Math.max(
             0,
             this.staleThresholdMs - (Date.now() - location.timestamp),
@@ -289,7 +331,7 @@ export class FirebaseRealtimeLocationAdapter implements RealtimeLocationService 
             updateKey,
             setTimeout(() => {
               const staleUpdate = { ...update, stale: true };
-              this.connectionState = "STALE";
+              this.setConnectionState("STALE");
               this.listeners
                 .get(contextId)
                 ?.forEach((listener) => listener(staleUpdate));

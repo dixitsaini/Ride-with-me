@@ -1,15 +1,39 @@
+import type {
+  BackgroundLocationStartOptions,
+  BackgroundLocationState,
+} from "./backgroundLocation";
+import type { LocationBufferSnapshot } from "./persistentBuffer";
+import type {
+  LocationSamplingConfig,
+  SamplingPolicyContext,
+} from "./samplingPolicy";
+
+export * from "./persistentBuffer";
+export * from "./sampleGate";
+export * from "./samplingPolicy";
+
 export type LocationPermissionState =
-  "NOT_REQUESTED" | "GRANTED" | "DENIED" | "RESTRICTED";
+  "NOT_REQUESTED" | "GRANTED" | "DENIED" | "BLOCKED" | "LIMITED" | "RESTRICTED";
 
 export type LocationState =
   | "UNAVAILABLE"
   | "PERMISSION_REQUIRED"
   | "PERMISSION_DENIED"
+  | "PERMISSION_BLOCKED"
+  | "PERMISSION_LIMITED"
+  | "REQUESTED"
+  | "AUTHORIZED"
   | "READY"
   | "TRACKING"
+  | "PAUSED_BY_USER"
   | "STALE"
+  | "RECOVERING"
+  | "GPS_UNAVAILABLE"
+  | "LOW_ACCURACY"
   | "OFFLINE"
+  | "OFFLINE_BUFFERING"
   | "SYNCING"
+  | "SUSPENDED"
   | "ERROR";
 
 export type RealtimeState =
@@ -22,6 +46,8 @@ export type RealtimeState =
 
 export type ConnectionState = RealtimeState;
 
+export type LocationSource = "gps" | "network" | "fused" | "mock" | "unknown";
+
 export type LocationSample = {
   latitude: number;
   longitude: number;
@@ -29,6 +55,7 @@ export type LocationSample = {
   accuracy: number;
   speed?: number;
   heading?: number;
+  source?: LocationSource;
 };
 
 export const DEFAULT_LOCATION_STALE_THRESHOLD_MS = 30_000;
@@ -37,16 +64,31 @@ export type LocationPermissionInput =
   | "not_requested"
   | "granted"
   | "denied"
+  | "blocked"
   | "restricted"
   | "limited"
   | "unknown"
   | undefined
   | null;
 
+export type LocationAppState =
+  "foreground" | "background" | "inactive" | "unknown";
+
+export type LocationAccuracyQuality = "GOOD" | "LOW" | "UNKNOWN";
+
+export type LocationPublisherState = "IDLE" | "ONLINE" | "OFFLINE" | "FAILED";
+
 export type LocationStatus = {
   permission: LocationPermissionState;
   tracking: LocationState;
   freshness: "FRESH" | "STALE" | "UNKNOWN";
+  accuracy?: LocationAccuracyQuality;
+  gpsAvailable?: boolean;
+  appState?: LocationAppState;
+  lastSampleAt?: number | null;
+  buffer?: LocationBufferSnapshot;
+  publisherState?: LocationPublisherState;
+  error?: string | null;
 };
 
 export type ConnectionStatus = {
@@ -61,15 +103,54 @@ export type SyncStatus = "IDLE" | "PENDING" | "SYNCING" | "FAILED";
 
 export type LocationService = {
   permissionState: () => Promise<LocationPermissionState>;
+  refreshPermission?: () => Promise<LocationPermissionState>;
   requestPermission?: () => Promise<LocationPermissionState>;
-  startTracking: () => Promise<void>;
+  hasServicesEnabled?: () => Promise<boolean>;
+  startTracking: (config?: LocationSamplingConfig) => Promise<void>;
   stopTracking: () => Promise<void>;
   getCurrentLocation: () => Promise<LocationSample | null>;
-  subscribe: (listener: (location: LocationSample) => void) => () => void;
+  subscribe: (
+    listener: (location: LocationSample) => void,
+    onError?: (error: Error) => void,
+  ) => () => void;
   getTrackingState: () => LocationState;
   getErrorState: () => Error | null;
-  getPendingLocationCount: () => number;
-  getPendingLocationState: () => LocationBufferState;
+  getLatestSample?: () => LocationSample | null;
+  getPendingLocationCount?: () => number;
+  getPendingLocationState?: () => LocationBufferState;
+  dispose?: () => void;
+};
+
+export type LocationSamplePublisher = {
+  publish: (sample: LocationSample) => Promise<void>;
+  isReachable?: () => boolean;
+  getConnectionState?: () => ConnectionState;
+};
+
+export type LocationEngineStatus = {
+  state: LocationState;
+  permission: LocationPermissionState;
+  gpsAvailable: boolean;
+  updatesActive: boolean;
+  pausedByUser: boolean;
+  suspended: boolean;
+  appState: LocationAppState;
+  freshness: "FRESH" | "STALE" | "UNKNOWN";
+  accuracy: LocationAccuracyQuality;
+  lastSampleAt: number | null;
+  lastAcceptedSample: LocationSample | null;
+  buffer: LocationBufferSnapshot;
+  publisherState: LocationPublisherState;
+  connection: ConnectionState;
+  error: string | null;
+};
+
+export type EngineBackgroundStatus = {
+  supported: boolean;
+  state: BackgroundLocationState;
+  permission: LocationPermissionState;
+  error: string | null;
+  desired: boolean;
 };
 
 export type LocationController = {
@@ -85,6 +166,22 @@ export type LocationController = {
   subscribeToStatusChanges: (
     listener: (status: LocationStatus) => void,
   ) => () => void;
+  getEngineStatus?: () => LocationEngineStatus;
+  subscribeToEngineStatus?: (
+    listener: (status: LocationEngineStatus) => void,
+  ) => () => void;
+  setPublisher?: (publisher: LocationSamplePublisher | null) => void;
+  setContext?: (context: SamplingPolicyContext) => void;
+  startBackgroundUpdates?: (
+    options?: BackgroundLocationStartOptions,
+  ) => Promise<EngineBackgroundStatus>;
+  stopBackgroundUpdates?: () => Promise<EngineBackgroundStatus>;
+  getBackgroundStatus?: () => EngineBackgroundStatus;
+  pauseTracking?: () => Promise<void>;
+  resumeTracking?: () => Promise<void>;
+  refresh?: () => Promise<LocationEngineStatus>;
+  flush?: () => Promise<void>;
+  dispose?: () => void;
 };
 
 export type RealtimeLocationUpdate = {
@@ -100,8 +197,24 @@ export type RealtimeLocationService = {
     contextId: string,
     listener: (update: RealtimeLocationUpdate) => void,
   ) => () => void;
-  authorizeContext?: (contextId: string) => Promise<void>;
-  revokeContext?: (contextId: string) => Promise<void>;
+  /**
+   * Opens a context for the caller. `participants` lists additional rider ids
+   * the caller is authorised to grant (the ride owner grants the roster); the
+   * caller is always included.
+   */
+  authorizeContext?: (
+    contextId: string,
+    participants?: string[],
+  ) => Promise<void>;
+  /**
+   * Revokes access to a context. Omitted `participants` revokes the caller
+   * only; an explicit list revokes exactly that set (the caller is not added
+   * implicitly, so an owner can remove someone without losing their own read).
+   */
+  revokeContext?: (
+    contextId: string,
+    participants?: string[],
+  ) => Promise<void>;
   connect: () => void;
   disconnect: () => void;
   reconnect: () => void;
@@ -127,16 +240,19 @@ export type MapLocationController = {
 };
 
 export function normalizeLocationPermission(
-  permission: LocationPermissionInput,
+  permission: string | null | undefined,
 ): LocationPermissionState {
   switch (permission?.toLowerCase?.() ?? "unknown") {
     case "granted":
       return "GRANTED";
     case "denied":
       return "DENIED";
+    case "blocked":
+      return "BLOCKED";
     case "restricted":
-    case "limited":
       return "RESTRICTED";
+    case "limited":
+      return "LIMITED";
     case "not_requested":
       return "NOT_REQUESTED";
     default:
@@ -165,6 +281,7 @@ export function createLocationSample(
     accuracy: input.accuracy,
     speed: input.speed,
     heading: input.heading,
+    source: input.source,
   };
 }
 
@@ -175,36 +292,104 @@ export function isLocationStale(
   return Date.now() - location.timestamp > staleThresholdMs;
 }
 
+export type LocationStateSignals = {
+  requested?: boolean;
+  authorized?: boolean;
+  gpsAvailable?: boolean;
+  pausedByUser?: boolean;
+  suspended?: boolean;
+  recovering?: boolean;
+  syncing?: boolean;
+  buffering?: boolean;
+  lowAccuracy?: boolean;
+  awaitingFirstSample?: boolean;
+};
+
+export function isLocationPermissionUsable(
+  permission: LocationPermissionState,
+): boolean {
+  return permission === "GRANTED" || permission === "LIMITED";
+}
+
 export function transitionLocationState(
   previousState: LocationState,
   permissionState: LocationPermissionState,
   hasLocation: boolean,
   isOffline: boolean,
   stale = false,
+  signals: LocationStateSignals = {},
 ): LocationState {
-  if (isOffline) {
-    return "OFFLINE";
+  if (permissionState === "BLOCKED") {
+    return "PERMISSION_BLOCKED";
   }
 
   if (permissionState === "DENIED") {
     return "PERMISSION_DENIED";
   }
 
+  if (permissionState === "NOT_REQUESTED") {
+    return signals.requested ? "REQUESTED" : "PERMISSION_REQUIRED";
+  }
+
   if (permissionState === "RESTRICTED") {
     return "PERMISSION_REQUIRED";
   }
 
-  if (permissionState === "NOT_REQUESTED") {
-    return "PERMISSION_REQUIRED";
+  if (signals.pausedByUser) {
+    return "PAUSED_BY_USER";
   }
 
-  if (permissionState === "GRANTED") {
-    if (!hasLocation) {
-      return "UNAVAILABLE";
+  if (signals.suspended) {
+    return "SUSPENDED";
+  }
+
+  if (signals.gpsAvailable === false) {
+    return "GPS_UNAVAILABLE";
+  }
+
+  if (signals.syncing) {
+    return "SYNCING";
+  }
+
+  if (isOffline) {
+    return signals.buffering ? "OFFLINE_BUFFERING" : "OFFLINE";
+  }
+
+  if (signals.recovering) {
+    return "RECOVERING";
+  }
+
+  if (permissionState === "LIMITED") {
+    if (signals.awaitingFirstSample || !hasLocation) {
+      return "PERMISSION_LIMITED";
     }
 
     if (stale) {
       return "STALE";
+    }
+
+    if (signals.lowAccuracy) {
+      return "LOW_ACCURACY";
+    }
+
+    return previousState === "TRACKING" ? "TRACKING" : "PERMISSION_LIMITED";
+  }
+
+  if (permissionState === "GRANTED") {
+    if (signals.awaitingFirstSample) {
+      return "AUTHORIZED";
+    }
+
+    if (!hasLocation) {
+      return previousState === "TRACKING" ? "STALE" : "UNAVAILABLE";
+    }
+
+    if (stale) {
+      return "STALE";
+    }
+
+    if (signals.lowAccuracy) {
+      return "LOW_ACCURACY";
     }
 
     return previousState === "TRACKING" ? "TRACKING" : "READY";
@@ -339,45 +524,69 @@ export function createMapLocationController(): MapLocationController {
 
 export function createMockLocationService(): LocationService & {
   publish: (location: LocationSample) => void;
+  setPermission?: (value: LocationPermissionState) => void;
+  setServicesEnabled?: (value: boolean) => void;
 } {
   const listeners = new Set<(location: LocationSample) => void>();
   const queue = createLocationSampleQueue();
   let permissionStateValue: LocationPermissionState = "GRANTED";
   let trackingStateValue: LocationState = "READY";
   let errorValue: Error | null = null;
+  let servicesEnabled = true;
+  let latestSample: LocationSample | null = null;
 
-  return {
+  const service: LocationService & {
+    publish: (location: LocationSample) => void;
+    setPermission: (value: LocationPermissionState) => void;
+    setServicesEnabled: (value: boolean) => void;
+  } = {
     async permissionState() {
       return permissionStateValue;
     },
-    async requestPermission() {
-      permissionStateValue = "GRANTED";
+    async refreshPermission() {
       return permissionStateValue;
     },
+    async requestPermission() {
+      if (permissionStateValue === "NOT_REQUESTED") {
+        permissionStateValue = "GRANTED";
+      }
+      return permissionStateValue;
+    },
+    async hasServicesEnabled() {
+      return servicesEnabled;
+    },
     async startTracking() {
-      trackingStateValue = "TRACKING";
+      trackingStateValue = servicesEnabled ? "TRACKING" : "GPS_UNAVAILABLE";
       errorValue = null;
     },
     async stopTracking() {
       trackingStateValue = "READY";
     },
     async getCurrentLocation() {
-      return createLocationSample({
+      const sample = createLocationSample({
         latitude: 40.7128,
         longitude: -74.006,
         timestamp: Date.now(),
         accuracy: 8,
+        source: "mock",
       });
+      latestSample = sample;
+      return sample;
     },
     subscribe(listener) {
       listeners.add(listener);
-      return () => listeners.delete(listener);
+      return () => {
+        listeners.delete(listener);
+      };
     },
     getTrackingState() {
       return trackingStateValue;
     },
     getErrorState() {
       return errorValue;
+    },
+    getLatestSample() {
+      return latestSample;
     },
     getPendingLocationCount() {
       return queue.pendingCount();
@@ -387,16 +596,46 @@ export function createMockLocationService(): LocationService & {
     },
     publish(location) {
       queue.enqueue(location);
+      latestSample = location;
       listeners.forEach((listener) => listener(location));
     },
+    setPermission(value) {
+      permissionStateValue = value;
+    },
+    setServicesEnabled(value) {
+      servicesEnabled = value;
+    },
   };
+
+  return service;
 }
+
+type EngineBackedLocationService = LocationService &
+  Partial<
+    Pick<
+      LocationController,
+      | "getEngineStatus"
+      | "subscribeToEngineStatus"
+      | "setPublisher"
+      | "setContext"
+      | "startBackgroundUpdates"
+      | "stopBackgroundUpdates"
+      | "getBackgroundStatus"
+      | "pauseTracking"
+      | "resumeTracking"
+      | "refresh"
+      | "flush"
+      | "dispose"
+    >
+  >;
 
 export function createLocationController(
   service: LocationService,
 ): LocationController {
   const locationListeners = new Set<(location: LocationSample) => void>();
   const statusListeners = new Set<(status: LocationStatus) => void>();
+  const engine = service as EngineBackedLocationService;
+  let lastSample: LocationSample | null = service.getLatestSample?.() ?? null;
   let status: LocationStatus = {
     permission: "NOT_REQUESTED",
     tracking: "UNAVAILABLE",
@@ -407,30 +646,56 @@ export function createLocationController(
     statusListeners.forEach((listener) => listener(status));
   };
 
+  const syncFromEngine = (): boolean => {
+    const engineStatus = engine.getEngineStatus?.();
+    if (!engineStatus) {
+      return false;
+    }
+
+    lastSample = engineStatus.lastAcceptedSample;
+    status = {
+      permission: engineStatus.permission,
+      tracking: engineStatus.state,
+      freshness: engineStatus.freshness,
+      accuracy: engineStatus.accuracy,
+      gpsAvailable: engineStatus.gpsAvailable,
+      appState: engineStatus.appState,
+      lastSampleAt: engineStatus.lastSampleAt,
+      buffer: engineStatus.buffer,
+      publisherState: engineStatus.publisherState,
+      error: engineStatus.error,
+    };
+    return true;
+  };
+
   const refreshStatus = () => {
-    const tracking = service.getTrackingState();
-    const freshness = isLocationStale(
-      createLocationSample({
-        latitude: 0,
-        longitude: 0,
-        timestamp: Date.now() - 10000,
-        accuracy: 1,
-      }),
-      30000,
-    )
-      ? "STALE"
-      : "FRESH";
+    if (syncFromEngine()) {
+      emitStatus();
+      return;
+    }
+
+    const freshness = lastSample
+      ? isLocationStale(lastSample, DEFAULT_LOCATION_STALE_THRESHOLD_MS)
+        ? "STALE"
+        : "FRESH"
+      : "UNKNOWN";
 
     status = {
-      permission: status.permission,
-      tracking,
+      ...status,
+      tracking: service.getTrackingState(),
       freshness,
+      lastSampleAt: lastSample?.timestamp ?? null,
     };
     emitStatus();
   };
 
   service.subscribe((location) => {
+    lastSample = location;
     locationListeners.forEach((listener) => listener(location));
+    refreshStatus();
+  });
+
+  engine.subscribeToEngineStatus?.(() => {
     refreshStatus();
   });
 
@@ -458,21 +723,43 @@ export function createLocationController(
     async startTracking() {
       await service.startTracking();
       status.permission = await service.permissionState();
-      status.tracking = service.getTrackingState();
+      if (!syncFromEngine()) {
+        status.tracking = service.getTrackingState();
+      }
       emitStatus();
     },
     async stopTracking() {
       await service.stopTracking();
-      status.tracking = service.getTrackingState();
+      if (!syncFromEngine()) {
+        status.tracking = service.getTrackingState();
+      }
       emitStatus();
     },
     subscribeToLocationChanges(listener) {
       locationListeners.add(listener);
-      return () => locationListeners.delete(listener);
+      return () => {
+        locationListeners.delete(listener);
+      };
     },
     subscribeToStatusChanges(listener) {
       statusListeners.add(listener);
-      return () => statusListeners.delete(listener);
+      return () => {
+        statusListeners.delete(listener);
+      };
+    },
+    getEngineStatus: engine.getEngineStatus?.bind(engine),
+    subscribeToEngineStatus: engine.subscribeToEngineStatus?.bind(engine),
+    setPublisher: engine.setPublisher?.bind(engine),
+    setContext: engine.setContext?.bind(engine),
+    startBackgroundUpdates: engine.startBackgroundUpdates?.bind(engine),
+    stopBackgroundUpdates: engine.stopBackgroundUpdates?.bind(engine),
+    getBackgroundStatus: engine.getBackgroundStatus?.bind(engine),
+    pauseTracking: engine.pauseTracking?.bind(engine),
+    resumeTracking: engine.resumeTracking?.bind(engine),
+    refresh: engine.refresh?.bind(engine),
+    flush: engine.flush?.bind(engine),
+    dispose() {
+      engine.dispose?.();
     },
   };
 }

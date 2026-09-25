@@ -3,54 +3,111 @@ import { Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { RootStackParamList } from "../../app/navigation";
 import {
-  ReactNativeMapSurface,
-  type MapRider,
-} from "../map/ReactNativeMapSurface";
-import { developmentRidingService } from "./development";
+  createMapController,
+  createRealMapProvider,
+  type MapController,
+  type MapRenderState,
+  type RiderMarker,
+} from "../map";
+import { MapSurface } from "../map/MapSurface";
+import {
+  createDevelopmentIdentityService,
+  developmentRidingService,
+} from "./development";
 import type { Ride } from "./domain";
 
 type Props = NativeStackScreenProps<RootStackParamList, "LiveGroupMap">;
 
+const CONNECTION_LABEL: Record<string, string> = {
+  DISCONNECTED: "OFFLINE",
+  CONNECTING: "CONNECTING",
+  CONNECTED: "CONNECTED",
+  RECONNECTING: "RECONNECTING",
+  STALE: "STALE",
+  ERROR: "ERROR",
+};
+
 export function LiveGroupMapScreen({ route, navigation }: Props) {
   const [ride, setRide] = useState<Ride | null>(null);
-  const [riders, setRiders] = useState<Map<string, MapRider>>(new Map());
-  const [status, setStatus] = useState("CONNECTING");
+  const [map, setMap] = useState<MapController | null>(null);
+  const [mapState, setMapState] = useState<MapRenderState | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
     let stop: (() => void) | undefined;
+    let unsubscribe: (() => void) | undefined;
+    let controller: MapController | null = null;
+
     void (async () => {
       try {
+        const identity = await createDevelopmentIdentityService().getIdentity();
         const nextRide = await developmentRidingService.getRide(
           route.params.rideId,
         );
         if (!nextRide) {
           throw new Error("Ride was not found.");
         }
+
+        const nextController = createMapController({
+          provider: createRealMapProvider(),
+          currentRiderId: identity.userId,
+        });
+        nextController.initialize();
+        nextController.setConnectionState(
+          developmentRidingService.getLocationConnectionState(),
+        );
+
+        if (!active) {
+          nextController.dispose();
+          return;
+        }
+
+        controller = nextController;
+        unsubscribe = nextController.subscribe(() => {
+          if (active && controller) {
+            setMapState(controller.getState());
+          }
+        });
+        setMap(nextController);
+        setMapState(nextController.getState());
         setRide(nextRide);
-        setStatus(developmentRidingService.getLocationConnectionState());
+
         stop = await developmentRidingService.subscribeRideLocations(
           nextRide.id,
           (update) => {
-            if (!active) return;
-            setStatus(update.stale ? "STALE" : "CONNECTED");
-            setRiders((current) => new Map(current).set(update.userId, update));
+            if (!active || !controller) return;
+            controller.setConnectionState(
+              developmentRidingService.getLocationConnectionState(),
+            );
+            controller.applyRiderUpdate(update);
           },
         );
+        if (!active) {
+          stop();
+          stop = undefined;
+          return;
+        }
+
         await developmentRidingService.publishCurrentLocation(nextRide.id);
       } catch (reason) {
-        if (active)
+        if (active) {
           setError(
             reason instanceof Error
               ? reason.message
               : "Unable to load live ride.",
           );
+        }
       }
     })();
+
     return () => {
       active = false;
       stop?.();
+      unsubscribe?.();
+      controller?.dispose();
+      setMap(null);
+      setMapState(null);
     };
   }, [route.params.rideId]);
 
@@ -81,6 +138,16 @@ export function LiveGroupMapScreen({ route, navigation }: Props) {
       );
     }
   };
+
+  const riders: RiderMarker[] = mapState
+    ? [
+        ...(mapState.currentRider ? [mapState.currentRider] : []),
+        ...mapState.riders,
+      ]
+    : [];
+  const status = mapState
+    ? (CONNECTION_LABEL[mapState.connection] ?? mapState.connection)
+    : "CONNECTING";
 
   return (
     <SafeAreaView style={styles.screen}>
@@ -120,14 +187,14 @@ export function LiveGroupMapScreen({ route, navigation }: Props) {
         </View>
       </View>
       {error ? <Text style={styles.error}>{error}</Text> : null}
-      <ReactNativeMapSurface riders={[...riders.values()]} />
+      {map ? <MapSurface map={map} /> : null}
       <View style={styles.riderList}>
-        {[...riders.values()].map((rider) => (
-          <Text key={rider.userId} style={styles.riderText}>
-            {rider.userId}: {rider.stale ? "STALE" : "LIVE"}
+        {riders.map((rider) => (
+          <Text key={rider.riderId} style={styles.riderText}>
+            {rider.label}: {rider.state}
           </Text>
         ))}
-        {riders.size === 0 ? (
+        {riders.length === 0 ? (
           <Text style={styles.muted}>No participant updates yet.</Text>
         ) : null}
       </View>

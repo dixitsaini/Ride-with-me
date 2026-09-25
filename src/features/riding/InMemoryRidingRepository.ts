@@ -14,6 +14,14 @@ export class InMemoryRidingRepository implements RidingRepository {
   private readonly members = new Map<string, GroupMember>();
   private readonly invitations = new Map<string, GroupInvitation>();
   private readonly rides = new Map<string, Ride>();
+  private readonly memberListeners = new Map<
+    string,
+    Set<(members: GroupMember[]) => void>
+  >();
+  private readonly rideListeners = new Map<
+    string,
+    Set<(ride: Ride | null) => void>
+  >();
 
   async listGroups(userId: string): Promise<Group[]> {
     const memberGroups = [...this.members.values()]
@@ -90,7 +98,16 @@ export class InMemoryRidingRepository implements RidingRepository {
     if (this.members.has(key)) {
       throw new Error("User is already a group member.");
     }
+    const group = this.groups.get(member.groupId);
+    if (
+      group &&
+      member.status === "ACTIVE" &&
+      this.countActiveMembers(member.groupId) >= group.settings.maxMembers
+    ) {
+      throw new Error("This group is full.");
+    }
     this.members.set(key, copy(member));
+    this.notifyMembers(member.groupId);
     return copy(member);
   }
 
@@ -100,7 +117,24 @@ export class InMemoryRidingRepository implements RidingRepository {
       throw new Error("Group member was not found.");
     }
     this.members.set(key, copy(member));
+    this.notifyMembers(member.groupId);
     return copy(member);
+  }
+
+  subscribeToMembers(
+    groupId: string,
+    listener: (members: GroupMember[]) => void,
+  ): () => void {
+    const listeners = this.memberListeners.get(groupId) ?? new Set();
+    listeners.add(listener);
+    this.memberListeners.set(groupId, listeners);
+    listener(this.membersOf(groupId));
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) {
+        this.memberListeners.delete(groupId);
+      }
+    };
   }
 
   async createInvitation(
@@ -115,6 +149,12 @@ export class InMemoryRidingRepository implements RidingRepository {
       (item) => item.code === code,
     );
     return invitation ? copy(invitation) : null;
+  }
+
+  async listInvitations(groupId: string): Promise<GroupInvitation[]> {
+    return [...this.invitations.values()]
+      .filter((invitation) => invitation.groupId === groupId)
+      .map(copy);
   }
 
   async revokeInvitation(invitationId: string): Promise<GroupInvitation> {
@@ -135,13 +175,25 @@ export class InMemoryRidingRepository implements RidingRepository {
     if (duplicate) {
       throw new Error("The group already has an active ride.");
     }
-    this.rides.set(ride.id, copy(ride));
-    return copy(ride);
+    const stored = copy(ride);
+    this.rides.set(stored.id, stored);
+    this.requireGroup(ride.groupId).activeRideId = stored.id;
+    this.notifyRide(stored.id);
+    return copy(stored);
   }
 
   async getRide(rideId: string): Promise<Ride | null> {
     const ride = this.rides.get(rideId);
     return ride ? copy(ride) : null;
+  }
+
+  async getActiveRide(groupId: string): Promise<Ride | null> {
+    const active = [...this.rides.values()].find(
+      (item) =>
+        item.groupId === groupId &&
+        ["READY", "ACTIVE", "PAUSED"].includes(item.state),
+    );
+    return active ? copy(active) : null;
   }
 
   async updateRideState(
@@ -152,8 +204,63 @@ export class InMemoryRidingRepository implements RidingRepository {
     const ride = this.requireRide(rideId);
     ride.state = state;
     ride.participants = copy(participants);
+    ride.participantIds = participants.map((participant) => participant.userId);
     ride.updatedAt = Date.now();
+    if (state === "COMPLETED" || state === "CANCELLED") {
+      const group = this.groups.get(ride.groupId);
+      if (group && group.activeRideId === rideId) {
+        group.activeRideId = null;
+        group.updatedAt = ride.updatedAt;
+      }
+    }
+    this.notifyRide(rideId);
     return copy(ride);
+  }
+
+  subscribeToRide(
+    rideId: string,
+    listener: (ride: Ride | null) => void,
+  ): () => void {
+    const listeners = this.rideListeners.get(rideId) ?? new Set();
+    listeners.add(listener);
+    this.rideListeners.set(rideId, listeners);
+    const ride = this.rides.get(rideId);
+    listener(ride ? copy(ride) : null);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) {
+        this.rideListeners.delete(rideId);
+      }
+    };
+  }
+
+  private countActiveMembers(groupId: string): number {
+    return [...this.members.values()].filter(
+      (member) => member.groupId === groupId && member.status === "ACTIVE",
+    ).length;
+  }
+
+  private membersOf(groupId: string): GroupMember[] {
+    return [...this.members.values()]
+      .filter((member) => member.groupId === groupId)
+      .map(copy);
+  }
+
+  private notifyMembers(groupId: string): void {
+    const members = this.membersOf(groupId);
+    this.memberListeners.get(groupId)?.forEach((listener) =>
+      listener(members),
+    );
+  }
+
+  private notifyRide(rideId: string): void {
+    const listeners = this.rideListeners.get(rideId);
+    if (!listeners || listeners.size === 0) {
+      return;
+    }
+    const ride = this.rides.get(rideId);
+    const value = ride ? copy(ride) : null;
+    listeners.forEach((listener) => listener(value));
   }
 
   private requireGroup(groupId: string): Group {

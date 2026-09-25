@@ -1,3 +1,6 @@
+// Must run before any ride starts: the OS needs the background location task
+// defined while the entry module is still evaluating.
+import "./src/core/location/background";
 import React from "react";
 import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
